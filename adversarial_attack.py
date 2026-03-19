@@ -18,7 +18,7 @@ class AdversarialAttack:
                       model: torch.nn.Module, 
                       x: torch.tensor, 
                       labels: torch.tensor, 
-                      norm='Linf', 
+                      norm: str='Linf', 
                      ) -> None:
         model.eval()
         
@@ -28,7 +28,7 @@ class AdversarialAttack:
         x_adv = attack(x, labels)
         
         # Evaluate the adversarial examples
-        self.evaluate(x, x_adv, labels)
+        self.evaluate(model, x, x_adv, labels, f"Square Attack {norm}")
 
     def fab_attack(self, 
                    model: torch.nn.Module, 
@@ -56,7 +56,7 @@ class AdversarialAttack:
         )
         
         # Evaluate the adversarial examples
-        self.evaluate(x, x_adv, labels)
+        self.evaluate(model, x, x_adv, labels, f"FAB Attack {norm}")
 
     def boundary_attack(self, 
                         model: torch.nn.Module, 
@@ -77,7 +77,7 @@ class AdversarialAttack:
             epsilons=None,
         )
         # Evaluate the adversarial examples
-        self.evaluate(x, clipped_adv, labels)
+        self.evaluate(model, x, clipped_adv, labels, f"Boundary Attack {norm}")
     
     def pgd_attack(self, 
                    model: torch.nn.Module, 
@@ -88,15 +88,15 @@ class AdversarialAttack:
         model.eval()
         adversary = AutoAttack(model, norm=norm, eps=self.eps, attacks_to_run=['apgd-ce', 'apgd-dlr'])
         x_adv = adversary.run_attack(x, labels)
-        self.evaluate(x, x_adv, labels)
+        self.evaluate(model, x, x_adv, labels, f"PGD Attack {norm}")
         
     
-    def attack_evaluation(self,
-                        model: torch.nn.Module, 
-                        x: torch.tensor, 
-                        labels: torch.tensor, 
-                        norm='Linf',
-                       ) -> None:
+    def auto_attack(self,
+                    model: torch.nn.Module, 
+                    x: torch.tensor, 
+                    labels: torch.tensor, 
+                    norm='Linf',
+                   ) -> None:
         adversary = AutoAttack(model, norm=norm, eps=self.eps, version='custom', attacks_to_run=['apgd-ce', 'apgd-dlr'])
         
         # Setting n_restarts lower makes it faster, but less thorough
@@ -104,7 +104,7 @@ class AdversarialAttack:
         adversary.apgd.n_iter = self.n_queries # Number of iterations for boundary optimization
         # Run the attack
         x_adv = adversary.run_standard_evaluation(x, labels)
-        self.evaluate(x, x_adv, labels)
+        self.evaluate(model, x, x_adv, labels, f"AutoAttack {norm}")
 
     def attack_success_rate(self,
                            preds: torch.tensor,
@@ -145,9 +145,11 @@ class AdversarialAttack:
 
 
     def evaluate(self,
+                 model: torch.nn.Module,
                  x: torch.tensor,
                  x_adv: torch.tensor,
-                 labels: torch.tensor, 
+                 labels: torch.tensor,
+                 test_name: str = "",
                 ) -> None:
         # -----------------------------
         # Evaluation
@@ -183,7 +185,7 @@ class AdversarialAttack:
         clean_acc = 100 * clean_correct / total
         adv_acc = 100 * adv_correct / total
         
-        print("\n===== RESULTS =====")
+        print(f"===== RESULTS {test_name} =====")
         print(f"Images evaluated: {total}")
         print(f"Clean Accuracy: {clean_acc:.4f}%")
         print(f"Robust Accuracy: {adv_acc:.4f}%") # robust accuracy = 1 - ASR
@@ -192,3 +194,15 @@ class AdversarialAttack:
         print(f"Mean Linf Perturbation Size: {linf_sz:.4f}%")
         print(f"Confidence Drop: {conf_drop:.4f}%")
         print("===================")
+
+    def run_all_attacks(self,
+                        model: torch.nn.Module, 
+                        x: torch.tensor, 
+                        labels: torch.tensor, 
+                        norm='Linf',
+                       ) -> None:
+        self.square_attack(model, x, labels, norm)
+        self.fab_attack(model, x, labels, norm)
+        self.boundary_attack(model, x, labels, norm)
+        self.pgd_attack(model, x, labels, norm)
+        self.auto_attack(model, x, labels, norm)
