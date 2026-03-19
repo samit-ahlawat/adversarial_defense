@@ -4,11 +4,13 @@ import torch.optim as optim
 from torchvision import datasets, transforms, models
 from torch.utils.data import DataLoader
 from dataclasses import dataclass
+import os
+from abc import ABC, abstractmethod
 
 @dataclass
 class RunArgs:
     batch_size: int = 32
-    test_batch_size: int = 32
+    test_batch_size: int = 10000
     epochs: int = 5
     lr: float = 0.001
     gamma: float = 0.9
@@ -18,7 +20,11 @@ class RunArgs:
     log_interval: int = 1000
     save_model_name: str | None = None
 
-class PretrainedResnet50:
+class PretrainedModel(ABC):
+    @abstractmethod
+    def base_model(self) -> torch.nn.Module:
+        raise NotImplementedError("subclass needs to implement")
+    
     def __init__(self, num_classes, args):
         self.args = args
         self.num_classes = num_classes
@@ -35,11 +41,18 @@ class PretrainedResnet50:
         # -----------------------
         # Load pretrained model
         # -----------------------
-        model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+        model = self.base_model()
         
         # Replace classification head fully connected layer
         in_features = model.fc.in_features
         model.fc = nn.Linear(in_features, num_classes)
+
+        for param in model.parameters():
+            param.requires_grad = False
+
+        # Only train final layer
+        for param in model.fc.parameters():
+            param.requires_grad = True
         
         model = model.to(self.device)
         return model
@@ -73,17 +86,18 @@ class PretrainedResnet50:
         # -------------------
         # Dataset
         # -------------------
+        download = not os.path.exists("./data")
         train_dataset = datasets.MNIST(
             root="./data",
             train=True,
-            download=True,
+            download=download,
             transform=self.transform
         )
         
         test_dataset = datasets.MNIST(
             root="./data",
             train=False,
-            download=True,
+            download=download,
             transform=self.transform
         )
         
@@ -164,7 +178,11 @@ class PretrainedResnet50:
         if self.args.save_model_name:
             torch.save(self.model.state_dict(), f"{self.args.save_model_name}.pth")
 
-if __name__ == "__main__":
-    args = RunArgs()
-    pt = PretrainedResnet50(num_classes=10, args=args)
-    pt.finetune()
+
+class PretrainedResnet18(PretrainedModel):
+    def base_model(self) -> torch.nn.Module:
+        return models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+
+class PretrainedResnet50(PretrainedModel):
+    def base_model(self) -> torch.nn.Module:
+        return models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
