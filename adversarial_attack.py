@@ -2,13 +2,16 @@ import torch
 import torch.nn as nn
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
-from torchattacks import AutoAttack, Square
+from torchattacks import Square, CW, FGSM, PGD
+from autoattack import AutoAttack
 import foolbox as fb
 from foolbox.attacks import BoundaryAttack
+from typing import Tuple
+import torch.nn.functional as F
 
 class AdversarialAttack:
     def __init__(self,
-                 n_queries: int = 5000, 
+                 n_queries: int = 50, 
                  eps: float = 8/255
                 ) -> None:
         self.n_queries = n_queries
@@ -30,6 +33,36 @@ class AdversarialAttack:
         # Evaluate the adversarial examples
         self.evaluate(model, x, x_adv, labels, f"Square Attack {norm}")
 
+    def cw_attack(self, 
+                      model: torch.nn.Module, 
+                      x: torch.tensor, 
+                      labels: torch.tensor, 
+                     ) -> None:
+        model.eval()
+        
+        attack = CW(model, c=1, kappa=0, steps=self.n_queries, lr=0.01)
+        
+        # Generate adversarial examples
+        x_adv = attack(x, labels)
+        
+        # Evaluate the adversarial examples
+        self.evaluate(model, x, x_adv, labels, f"CW Attack")
+
+    def fgsm_attack(self, 
+                      model: torch.nn.Module, 
+                      x: torch.tensor, 
+                      labels: torch.tensor, 
+                     ) -> None:
+        model.eval()
+        
+        attack = FGSM(model, eps=self.eps)
+        
+        # Generate adversarial examples
+        x_adv = attack(x, labels)
+        
+        # Evaluate the adversarial examples
+        self.evaluate(model, x, x_adv, labels, f"FGSM Attack")
+
     def fab_attack(self, 
                    model: torch.nn.Module, 
                    x: torch.tensor, 
@@ -42,7 +75,7 @@ class AdversarialAttack:
             model,
             norm=norm,
             eps=self.eps,
-            version='custom'
+            version='standard',
         )
         
         # Use only FAB attack
@@ -83,12 +116,11 @@ class AdversarialAttack:
                    model: torch.nn.Module, 
                    x: torch.tensor, 
                    labels: torch.tensor, 
-                   norm='Linf', 
                   ) -> None:
         model.eval()
-        adversary = AutoAttack(model, norm=norm, eps=self.eps, attacks_to_run=['apgd-ce', 'apgd-dlr'])
-        x_adv = adversary.run_attack(x, labels)
-        self.evaluate(model, x, x_adv, labels, f"PGD Attack {norm}")
+        attack = PGD(model, eps=self.eps, alpha=2/255, steps=self.n_queries)
+        x_adv = attack(x, labels)
+        self.evaluate(model, x, x_adv, labels, f"PGD Attack")
         
     
     def auto_attack(self,
@@ -97,7 +129,7 @@ class AdversarialAttack:
                     labels: torch.tensor, 
                     norm='Linf',
                    ) -> None:
-        adversary = AutoAttack(model, norm=norm, eps=self.eps, version='custom', attacks_to_run=['apgd-ce', 'apgd-dlr'])
+        adversary = AutoAttack(model, norm=norm, eps=self.eps, version='standard')
         
         # Setting n_restarts lower makes it faster, but less thorough
         adversary.apgd.n_restarts = 1 
@@ -110,10 +142,10 @@ class AdversarialAttack:
                            preds: torch.tensor,
                            preds_adv: torch.tensor,
                            labels: torch.tensor,
-                           ) -> float:
+                           ) -> Tuple[float, int, int]:
         correct = (preds == labels)
         misclassified = (preds_adv[correct] != labels[correct]).sum().item()
-        return misclassified / correct.sum().item()
+        return misclassified / correct.sum().item(), misclassified, correct.sum().item()
 
     def perturbation_size(self,
                           x: torch.tensor,
@@ -167,17 +199,17 @@ class AdversarialAttack:
             adv_correct = (preds_adv == labels).sum().item()
 
             # attack success rate
-            asr = self.attack_success_rate(preds, preds_adv, labels)
+            asr, misclassified, correct = self.attack_success_rate(preds, preds_adv, labels)
 
             # perturbation size
             l2_sz = self.perturbation_size(x, x_adv, norm=2)
-            linf_size = self.perturbation_size(x, x_adv)
+            linf_sz = self.perturbation_size(x, x_adv)
 
             # confidence drop
             conf_drop = self.confidence_drop(outputs, outputs_adv)
             
     
-        total = images.size(0)
+        total = x.size(0)
     
         # -----------------------------
         # Results
@@ -186,16 +218,18 @@ class AdversarialAttack:
         adv_acc = 100 * adv_correct / total
         
         print(f"===== RESULTS {test_name} =====")
-        print(f"Images evaluated: {total}")
+        print(f"Items evaluated: {total}")
+        print(f"Clean Correct Predicted: {clean_correct}")
+        print(f"Adv Correct Predicted: {adv_correct}")
         print(f"Clean Accuracy: {clean_acc:.4f}%")
         print(f"Robust Accuracy: {adv_acc:.4f}%") # robust accuracy = 1 - ASR
-        print(f"ASR: {asr:.2f}%")
+        print(f"ASR: {asr:.2f}%, correct: {correct}, misclassified: {misclassified}")
         print(f"Mean L2 Perturbation Size: {l2_sz:.4f}%")
         print(f"Mean Linf Perturbation Size: {linf_sz:.4f}%")
         print(f"Confidence Drop: {conf_drop:.4f}%")
         print("===================")
 
-    def run_all_attacks(self,
+    def run_attacks(self,
                         model: torch.nn.Module, 
                         x: torch.tensor, 
                         labels: torch.tensor, 
@@ -203,6 +237,5 @@ class AdversarialAttack:
                        ) -> None:
         self.square_attack(model, x, labels, norm)
         self.fab_attack(model, x, labels, norm)
-        self.boundary_attack(model, x, labels, norm)
-        self.pgd_attack(model, x, labels, norm)
+        #self.boundary_attack(model, x, labels, norm)
         self.auto_attack(model, x, labels, norm)
