@@ -3,12 +3,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from enum import Enum
-from typing import Callable, Any
+from typing import Callable, Any, Tuple
+from adversarial_attack import AdversarialAttack()
 
 class DefenseType(Enum):
     DISTILLATION = 0
     TRADES = 1,
-    MART = 2
+    MART = 2,
+    BAYESIAN = 3,
 
 class Defenses:
     def __init__(self,
@@ -74,7 +76,7 @@ class Defenses:
                     model: torch.nn.Module, 
                     x: torch.tensor, 
                     y: torch.tensor, # not used
-                    optimizer: torch.optim.Optimizer) -> float:
+                    optimizer: torch.optim.Optimizer) -> Tuple[float, torch.nn.Module]:
 
         model.train()
 
@@ -94,13 +96,13 @@ class Defenses:
         loss.backward()
         optimizer.step()
     
-        return loss.item()
+        return loss.item(), model
 
     def trades_loss(self,
                     model: torch.nn.Module, 
                     x: torch.tensor, 
                     y: torch.tensor, 
-                    optimizer: torch.optim.Optimizer) -> float:
+                    optimizer: torch.optim.Optimizer) -> Tuple[float, torch.nn.Module]:
 
         # loss = CE(f(x), y) + beta * KullbackLeibler(f(x_adv) || f(x))
         model.train()
@@ -139,13 +141,13 @@ class Defenses:
         loss.backward()
         optimizer.step()
     
-        return loss.item()
+        return loss.item(), model
 
     def mart_loss(self,
                   model: torch.nn.Module, 
                   x: torch.tensor, 
                   y: torch.tensor, 
-                  optimizer: torch.optim.Optimizer) -> float:
+                  optimizer: torch.optim.Optimizer) -> Tuple[float, torch.nn.Module]:
 
         # x_adv comes from PDF attack
         # loss focusses on misclassified examples and on margin-aware loss for correctly classified examples
@@ -186,7 +188,24 @@ class Defenses:
         loss.backward()
         optimizer.step()
     
-        return loss.item()
+        return loss.item(), model
+
+    def bayesian_loss(self,
+                      model: torch.nn.Module, 
+                      x: torch.tensor, 
+                      y: torch.tensor, 
+                      optimizer: torch.optim.Optimizer) -> Tuple[float, torch.nn.Module]:
+
+        model.train()
+    
+        logits = model(x)
+        loss = F.cross_entropy(logits, y)
+    
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    
+        return loss.item(), model    
 
     def get_defense(self, 
                     defense_type: DefenseType,
@@ -200,6 +219,8 @@ class Defenses:
             return self.trades_loss
         elif defense_type == DefenseType.MART:
             return self.mart_loss
+        elif defense_type == DefenseType.BAYESIAN:
+            return self.bayesian_loss   
         raise ValueError(f"Unsupported defense type {defense_type}")
 
     def train_teacher_model(self, 
@@ -226,6 +247,7 @@ class Defenses:
                       model: torch.nn.Module, 
                       optimizer: torch.optim.Optimizer,
                       data_loader: torch.utils.data.DataLoader,
+                      test_data_loader: torch.utils.data.DataLoader,
                       epochs: int,
                       defense_type: DefenseType
                      ) -> None:
@@ -235,6 +257,30 @@ class Defenses:
             epoch_loss = 0
             for x, y in data_loader:
                 x, y = x.to(device), y.to(device)
-                loss = defense(model, x, y, optimizer)
+                loss, model = defense(model, x, y, optimizer)
                 epoch_loss += loss
             print(f"Epoch {epoch} | Loss {epoch_loss:.4f}")
+
+        self.evaluate_defense(model, test_data_loader)
+
+    def evaluate_defense(self,
+                         model: torch.nn.Module, 
+                         data_loader: torch.utils.data.DataLoader,
+                         device
+                        ) -> None:
+
+        attack = AdversarialAttack()
+        count, max_batch = 0, 0
+        for x, labels in data_loader:
+            print(f"## Batch {count}/{max_batch} ##")
+            x = x.to(device)
+            labels = labels.to(device)
+            attack.fgsm_attack(model, x, labels)
+            attack.pgd_attack(model, x, labels)
+            attack.cw_attack(model, x, labels)
+            
+            attack.run_attacks(model, x, labels, 'Linf')
+            attack.run_attacks(model, x, labels, 'L2')
+            count += 1
+            break
+
